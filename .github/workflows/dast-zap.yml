@@ -3,8 +3,8 @@ name: DAST - OWASP ZAP Full Scan
 on:
   workflow_dispatch: # run manually from Actions tab
   # You can also add:
-  push:
-    branches: [ idor ]
+  # push:
+    # branches: [ idor ]
 
 jobs:
   zap_scan:
