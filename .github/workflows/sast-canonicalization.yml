@@ -1,0 +1,31 @@
+name: SAST - Semgrep (canonicalization-example)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep on canonicalization-example
+        run: |
+          semgrep --config p/owasp-top-ten canonicalization-example --error --sarif > semgrep.sarif
+
+      - name: Upload Semgrep results
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-canonicalization-report
+          path: semgrep.sarif
+
+      - name: Upload to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
