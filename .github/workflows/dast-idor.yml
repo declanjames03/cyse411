@@ -31,4 +31,4 @@ jobs:
         with:
           target: "http://host.docker.internal:3001"
           fail_action: true
-          allow_issue_writing: true
+          allow_issue_writing: false
