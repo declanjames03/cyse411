@@ -14,7 +14,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
       - name: Install dependencies
         working-directory: idor
@@ -30,5 +30,5 @@ jobs:
         uses: zaproxy/action-full-scan@v0.7.0
         with:
           target: "http://host.docker.internal:3001"
-          fail_action: false
+          fail_action: true
           allow_issue_writing: false
