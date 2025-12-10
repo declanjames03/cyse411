@@ -20,12 +20,12 @@ jobs:
           node-version: '20'
 
       - name: Install lab dependencies
-        working-directory: idor
+        working-directory: canonicalization-example
         run: |
           npm install
 
       - name: Start vulnerable app
-        working-directory: idor
+        working-directory: canonicalization-example
         run: |
           npm start &
           # wait for the server to boot
