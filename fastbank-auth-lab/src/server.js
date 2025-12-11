@@ -3,14 +3,36 @@ const bodyParser = require("body-parser");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
-const lusca = require("lusca");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const csurf = require("csurf");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-app.use(cookieParser());
+app.disable("x-powered-by");
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"]
+      }
+    },
+    crossOriginEmbedderPolicy: false
+  })
+);
+
+app.use(bodyParser.urlencoded({ extended: false, limit: "10kb" }));
+app.use(bodyParser.json({ limit: "10kb" }));
+
+const COOKIE_SECRET = process.env.COOKIE_SECRET || "please-set-a-real-secret-in-prod";
+app.use(cookieParser(COOKIE_SECRET));
+
 app.use(express.static("public"));
 
 const users = [
@@ -34,24 +56,71 @@ function cleanupExpiredSessions() {
     }
   }
 }
-
 setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
 
 function findUser(username) {
   if (typeof username !== "string") return null;
   const name = username.trim();
+  if (name.length === 0 || name.length > 150) return null;
   return users.find((u) => u.username === name);
 }
 
 function isValidCredentialInput(obj) {
   if (!obj || typeof obj !== "object") return false;
   if (typeof obj.username !== "string" || typeof obj.password !== "string") return false;
-  if (obj.username.length === 0 || obj.password.length === 0) return false;
+  const uname = obj.username.trim();
+  if (uname.length === 0 || uname.length > 150) return false;
+  if (obj.password.length === 0 || obj.password.length > 200) return false;
   return true;
 }
 
+function cookieOptions() {
+  const isProd = process.env.NODE_ENV === "production";
+  return {
+    httpOnly: true,
+    secure: !!isProd,
+    signed: true,
+    sameSite: "Strict",
+    path: "/",
+    maxAge: 24 * 60 * 60 * 1000
+  };
+}
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use(apiLimiter);
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { success: false, message: "Too many login attempts from this IP, try later." },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const csrfProtection = csurf({
+  cookie: {
+    key: "_csrf",
+    httpOnly: true,
+    sameSite: "Strict",
+    secure: process.env.NODE_ENV === "production",
+    signed: true
+  }
+});
+
+app.get("/api/csrf-token", (req, res, next) => {
+  csrfProtection(req, res, (err) => {
+    if (err) return next(err);
+    res.json({ csrfToken: req.csrfToken() });
+  });
+});
+
 app.get("/api/me", (req, res) => {
-  const token = req.cookies.session;
+  const token = req.signedCookies && req.signedCookies.session;
   if (!token || !sessions[token]) {
     return res.status(401).json({ authenticated: false });
   }
@@ -71,17 +140,7 @@ app.get("/api/me", (req, res) => {
   res.json({ authenticated: true, username: user.username });
 });
 
-function cookieOptions() {
-  const isProd = process.env.NODE_ENV === "production";
-  return {
-    httpOnly: true,
-    secure: !!isProd,
-    sameSite: "Lax",
-    maxAge: 24 * 60 * 60 * 1000
-  };
-}
-
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", loginLimiter, csrfProtection, async (req, res) => {
   if (!isValidCredentialInput(req.body)) {
     return res.status(400).json({ success: false, message: "Invalid credentials" });
   }
@@ -127,13 +186,24 @@ app.post("/api/login", async (req, res) => {
   res.json({ success: true });
 });
 
-app.post("/api/logout", (req, res) => {
-  const token = req.cookies.session;
+app.post("/api/logout", csrfProtection, (req, res) => {
+  const token = req.signedCookies && req.signedCookies.session;
   if (token && sessions[token]) {
     delete sessions[token];
   }
   res.clearCookie("session", cookieOptions());
   res.json({ success: true });
+});
+
+app.use((err, req, res, next) => {
+  const isProd = process.env.NODE_ENV === "production";
+  if (!isProd) {
+    console.error(err);
+  }
+  if (err.code === "EBADCSRFTOKEN") {
+    return res.status(403).json({ success: false, message: "Invalid CSRF token" });
+  }
+  res.status(500).json({ success: false, message: "Internal server error" });
 });
 
 app.listen(PORT, () => {
