@@ -2,208 +2,105 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
+// bcrypt is installed but NOT used in the vulnerable baseline:
 const bcrypt = require("bcrypt");
-const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
-const csurf = require("csurf");
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = 3001;
 
-app.disable("x-powered-by");
-
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
-        objectSrc: ["'none'"],
-        baseUri: ["'self'"],
-        formAction: ["'self'"]
-      }
-    },
-    crossOriginEmbedderPolicy: false
-  })
-);
-
-app.use(bodyParser.urlencoded({ extended: false, limit: "10kb" }));
-app.use(bodyParser.json({ limit: "10kb" }));
-
-const COOKIE_SECRET = process.env.COOKIE_SECRET || "please-set-a-real-secret-in-prod";
-app.use(cookieParser(COOKIE_SECRET));
-
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+app.use(cookieParser());
 app.use(express.static("public"));
 
+/**
+ * VULNERABLE FAKE USER DB
+ * For simplicity, we start with a single user whose password is "password123".
+ * In the vulnerable version, we hash with a fast hash (SHA-256-like).
+ */
 const users = [
   {
     id: 1,
     username: "student",
-    passwordHash: bcrypt.hashSync("password123", 12)
+    // VULNERABLE: fast hash without salt
+    passwordHash: fastHash("password123") // students must replace this scheme with bcrypt
   }
 ];
 
-const sessions = {};
-const loginAttempts = {};
-const MAX_TRIES = 5;
-const LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
+// In-memory session store
+const sessions = {}; // token -> { userId }
 
-function cleanupExpiredSessions() {
-  const now = Date.now();
-  for (const t in sessions) {
-    if (sessions[t].expires && sessions[t].expires <= now) {
-      delete sessions[t];
-    }
-  }
+/**
+ * VULNERABLE FAST HASH FUNCTION
+ * Students MUST STOP using this and replace logic with bcrypt.
+ */
+function fastHash(password) {
+  return crypto.createHash("sha256").update(password).digest("hex");
 }
-setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
 
+// Helper: find user by username
 function findUser(username) {
-  if (typeof username !== "string") return null;
-  const name = username.trim();
-  if (name.length === 0 || name.length > 150) return null;
-  return users.find((u) => u.username === name);
+  return users.find((u) => u.username === username);
 }
 
-function isValidCredentialInput(obj) {
-  if (!obj || typeof obj !== "object") return false;
-  if (typeof obj.username !== "string" || typeof obj.password !== "string") return false;
-  const uname = obj.username.trim();
-  if (uname.length === 0 || uname.length > 150) return false;
-  if (obj.password.length === 0 || obj.password.length > 200) return false;
-  return true;
-}
-
-function cookieOptions() {
-  const isProd = process.env.NODE_ENV === "production";
-  return {
-    httpOnly: true,
-    secure: !!isProd,
-    signed: true,
-    sameSite: "Strict",
-    path: "/",
-    maxAge: 24 * 60 * 60 * 1000
-  };
-}
-
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false
-});
-app.use(apiLimiter);
-
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { success: false, message: "Too many login attempts from this IP, try later." },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-const csrfProtection = csurf({
-  cookie: {
-    key: "_csrf",
-    httpOnly: true,
-    sameSite: "Strict",
-    secure: process.env.NODE_ENV === "production",
-    signed: true
-  }
-});
-
-app.get("/api/csrf-token", (req, res, next) => {
-  csrfProtection(req, res, (err) => {
-    if (err) return next(err);
-    res.json({ csrfToken: req.csrfToken() });
-  });
-});
-
+// Home API just to show who is logged in
 app.get("/api/me", (req, res) => {
-  const token = req.signedCookies && req.signedCookies.session;
+  const token = req.cookies.session;
   if (!token || !sessions[token]) {
     return res.status(401).json({ authenticated: false });
   }
-
   const session = sessions[token];
-  if (session.expires && session.expires <= Date.now()) {
-    delete sessions[token];
-    res.clearCookie("session", cookieOptions());
-    return res.status(401).json({ authenticated: false });
-  }
-
   const user = users.find((u) => u.id === session.userId);
-  if (!user) {
-    return res.status(401).json({ authenticated: false });
-  }
-
   res.json({ authenticated: true, username: user.username });
 });
 
-app.post("/api/login", loginLimiter, csrfProtection, async (req, res) => {
-  if (!isValidCredentialInput(req.body)) {
-    return res.status(400).json({ success: false, message: "Invalid credentials" });
-  }
-
+/**
+ * VULNERABLE LOGIN ENDPOINT
+ * - Uses fastHash instead of bcrypt
+ * - Error messages leak whether username exists
+ * - Session token is simple and predictable
+ * - Cookie lacks security flags
+ */
+app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
-  const now = Date.now();
-  const attempts = loginAttempts[username] || { tries: 0, firstAttemptTs: now };
-
-  if (now - attempts.firstAttemptTs > LOCKOUT_WINDOW_MS) {
-    attempts.tries = 0;
-    attempts.firstAttemptTs = now;
-  }
-
-  if (attempts.tries >= MAX_TRIES) {
-    return res.status(429).json({ success: false, message: "Too many attempts. Try later." });
-  }
-
   const user = findUser(username);
-  const dummyHash = "$2b$12$C6UzMDM.H6dfI/f/IKcZaeu";
-  const hashToCompare = user ? user.passwordHash : dummyHash;
 
-  let passwordMatches = false;
-  try {
-    passwordMatches = await bcrypt.compare(password, hashToCompare);
-  } catch (err) {
-    passwordMatches = false;
+  if (!user) {
+    // VULNERABLE: username enumeration via message
+    return res
+      .status(401)
+      .json({ success: false, message: "Unknown username" });
   }
 
-  if (!user || !passwordMatches) {
-    attempts.tries += 1;
-    loginAttempts[username] = attempts;
-    return res.status(401).json({ success: false, message: "Invalid username or password" });
+  const candidateHash = fastHash(password);
+  if (candidateHash !== user.passwordHash) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Wrong password" });
   }
 
-  delete loginAttempts[username];
+  // VULNERABLE: predictable token
+  const token = username + "-" + Date.now();
 
-  const token = crypto.randomBytes(32).toString("hex");
-  const sessionExpiry = Date.now() + 24 * 60 * 60 * 1000;
+  // VULNERABLE: session stored without expiration
+  sessions[token] = { userId: user.id };
 
-  sessions[token] = { userId: user.id, expires: sessionExpiry };
+  // VULNERABLE: cookie without httpOnly, secure, sameSite
+  res.cookie("session", token, {
+    // students must add: httpOnly: true, secure: true, sameSite: "lax"
+  });
 
-  res.cookie("session", token, cookieOptions());
-  res.json({ success: true });
+  // Client-side JS (login.html) will store this token in localStorage (vulnerable)
+  res.json({ success: true, token });
 });
 
-app.post("/api/logout", csrfProtection, (req, res) => {
-  const token = req.signedCookies && req.signedCookies.session;
+app.post("/api/logout", (req, res) => {
+  const token = req.cookies.session;
   if (token && sessions[token]) {
     delete sessions[token];
   }
-  res.clearCookie("session", cookieOptions());
+  res.clearCookie("session");
   res.json({ success: true });
-});
-
-app.use((err, req, res, next) => {
-  const isProd = process.env.NODE_ENV === "production";
-  if (!isProd) {
-    console.error(err);
-  }
-  if (err.code === "EBADCSRFTOKEN") {
-    return res.status(403).json({ success: false, message: "Invalid CSRF token" });
-  }
-  res.status(500).json({ success: false, message: "Internal server error" });
 });
 
 app.listen(PORT, () => {
