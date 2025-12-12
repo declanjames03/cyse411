@@ -3,6 +3,7 @@ const bodyParser = require("body-parser");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
+const csrf = require('lusca').csrf;
 
 const app = express();
 const PORT = 3001;
